@@ -1,0 +1,400 @@
+-- 服务引用（统一加载，避免重复）
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+-- 本地玩家核心变量（统一管理）
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local Humanoid = Character:WaitForChild("Humanoid")
+-- ======================== 核心配置（新增独立小UI配置） ========================
+local UI_CONFIG = {
+    -- 主面板配置（原有）
+    MainPanelSize = UDim2.new(0, 180, 0, 90),  
+    MainPanelPos = UDim2.new(0.8, -90, 0.5, -45),
+    ToggleBtnSize = UDim2.new(0, 30, 0, 30),
+    InputBoxSize = UDim2.new(0, 60, 0, 25),
+    PosBtnSize = UDim2.new(0, 28, 0, 25),  
+    DragBarWidth = 6,
+    DefaultDistance = 5,       
+    MinDistance = 2,           
+    MaxDistance = 50,          
+    HeightOffset = 8,          
+    SideOffset = 5,
+    -- 攻击按钮配置（原有）
+    AttackBtnSize = UDim2.new(0, 40, 0, 25),
+    AttackBtnPosX = 120,
+    AttackBtnPosY = 15,
+    -- 新增：独立隐藏小UI配置（悬浮式，可单独拖动）
+    SmallHideBtn = {
+        Size = UDim2.new(0, 28, 0, 28), -- 稍大更易点击
+        Pos = UDim2.new(0.95, -14, 0.1, -14), -- 右上角悬浮
+        BgColor = Color3.fromRGB(30, 30, 30),
+        TextColor = Color3.new(1, 1, 1),
+        TextSize = 12,
+        ZIndex = 10 -- 置顶显示，不被遮挡
+    }
+}
+-- 核心变量（新增小UI状态/拖动变量）
+local isFollowing = false
+local targetPlayer = nil
+local currentDistance = UI_CONFIG.DefaultDistance
+local currentPositionType = "身后"
+local isEditingDistance = false
+local isDraggingMainPanel = false
+local isUIVisible = true -- 主UI显示状态
+-- 独立小UI变量
+local isDraggingSmallBtn = false
+local smallBtnStartPos = nil
+-- 所有跟随位置配置（原有）
+local POSITION_CONFIG = {
+    ["身后"] = function(targetRoot)
+        return targetRoot.CFrame.Position - targetRoot.CFrame.LookVector * currentDistance
+    end,
+    ["头顶"] = function(targetRoot)
+        return targetRoot.CFrame.Position + Vector3.new(0, currentDistance + UI_CONFIG.HeightOffset, 0)
+    end,
+    ["左侧"] = function(targetRoot)
+        local leftVector = targetRoot.CFrame.RightVector * -1
+        return targetRoot.CFrame.Position + leftVector * currentDistance + Vector3.new(0, UI_CONFIG.SideOffset, 0)
+    end,
+    ["右侧"] = function(targetRoot)
+        local rightVector = targetRoot.CFrame.RightVector
+        return targetRoot.CFrame.Position + rightVector * currentDistance + Vector3.new(0, UI_CONFIG.SideOffset, 0)
+    end,
+    ["下方中间"] = function(targetRoot)
+        return targetRoot.CFrame.Position - Vector3.new(0, currentDistance + UI_CONFIG.HeightOffset, 0)
+    end
+}
+-- ======================== 第一步：创建独立隐藏小UI（悬浮式） ========================
+local MainGui = Instance.new("ScreenGui")
+MainGui.Name = "OP_Follow_Attack_Gui"
+MainGui.ResetOnSpawn = false
+MainGui.Parent = PlayerGui
+-- 独立隐藏/显示按钮（单独悬浮，不依附主面板）
+local SmallHideToggleBtn = Instance.new("TextButton")
+SmallHideToggleBtn.Name = "SmallHideToggleBtn"
+SmallHideToggleBtn.Size = UI_CONFIG.SmallHideBtn.Size
+SmallHideToggleBtn.Position = UI_CONFIG.SmallHideBtn.Pos
+SmallHideToggleBtn.BackgroundColor3 = UI_CONFIG.SmallHideBtn.BgColor
+SmallHideToggleBtn.BorderColor3 = Color3.fromRGB(60, 60, 60)
+SmallHideToggleBtn.Text = "隐"
+SmallHideToggleBtn.TextColor3 = UI_CONFIG.SmallHideBtn.TextColor
+SmallHideToggleBtn.Font = Enum.Font.SourceSansBold
+SmallHideToggleBtn.TextSize = UI_CONFIG.SmallHideBtn.TextSize
+SmallHideToggleBtn.ZIndex = UI_CONFIG.SmallHideBtn.ZIndex
+SmallHideToggleBtn.Parent = MainGui
+-- 小UI拖动逻辑（单独拖动，不影响主面板）
+SmallHideToggleBtn.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        isDraggingSmallBtn = true
+        smallBtnStartPos = {
+            inputPos = input.Position,
+            btnPos = SmallHideToggleBtn.Position
+        }
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if not isDraggingSmallBtn then return end
+    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = input.Position - smallBtnStartPos.inputPos
+        SmallHideToggleBtn.Position = UDim2.new(
+            smallBtnStartPos.btnPos.X.Scale,
+            smallBtnStartPos.btnPos.X.Offset + delta.X,
+            smallBtnStartPos.btnPos.Y.Scale,
+            smallBtnStartPos.btnPos.Y.Offset + delta.Y
+        )
+    end
+end)
+UserInputService.InputEnded:Connect(function(input)
+    if (input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1) then
+        isDraggingSmallBtn = false
+        smallBtnStartPos = nil
+    end
+end)
+-- ======================== 第二步：创建原有主面板（跟随+攻击功能） ========================
+local MainPanel = Instance.new("Frame")
+MainPanel.Name = "MainPanel"
+MainPanel.Size = UI_CONFIG.MainPanelSize
+MainPanel.Position = UI_CONFIG.MainPanelPos
+MainPanel.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+MainPanel.BorderColor3 = Color3.fromRGB(80, 80, 80)
+MainPanel.ClipsDescendants = true
+MainPanel.Parent = MainGui
+-- 1. 主面板拖动条（原有）
+local DragBar = Instance.new("TextButton")
+DragBar.Name = "DragBar"
+DragBar.Size = UDim2.new(0, UI_CONFIG.DragBarWidth, 1, 0)
+DragBar.Position = UDim2.new(1, -UI_CONFIG.DragBarWidth, 0, 0)
+DragBar.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+DragBar.Text = ""
+DragBar.ZIndex = 2
+DragBar.Parent = MainPanel
+-- 2. 跟随启停开关按钮（原有）
+local FollowToggleBtn = Instance.new("TextButton")
+FollowToggleBtn.Name = "FollowToggleBtn"
+FollowToggleBtn.Size = UI_CONFIG.ToggleBtnSize
+FollowToggleBtn.Position = UDim2.new(0, 10, 0.15, -15)
+FollowToggleBtn.BackgroundColor3 = Color3.new(1, 0.2, 0.2)
+FollowToggleBtn.Text = "启"
+FollowToggleBtn.TextColor3 = Color3.new(1, 1, 1)
+FollowToggleBtn.Font = Enum.Font.SourceSansBold
+FollowToggleBtn.TextSize = 12
+FollowToggleBtn.Parent = MainPanel
+-- 3. 跟随距离输入框（原有）
+local DistanceInput = Instance.new("TextBox")
+DistanceInput.Name = "DistanceInput"
+DistanceInput.Size = UI_CONFIG.InputBoxSize
+DistanceInput.Position = UDim2.new(0, 50, 0.15, -12.5)
+DistanceInput.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+DistanceInput.TextColor3 = Color3.new(1, 1, 1)
+DistanceInput.Text = tostring(currentDistance)
+DistanceInput.TextScaled = true
+DistanceInput.ClearTextOnFocus = false
+DistanceInput.PlaceholderText = "2-50"
+DistanceInput.Parent = MainPanel
+-- 4. 跟随位置选择按钮（5个位置，原有）
+local posTypes = {"身后", "头顶", "左侧", "右侧", "下方中间"}
+local posBtnXStart = 10
+for i, posType in ipairs(posTypes) do
+    local PosBtn = Instance.new("TextButton")
+    PosBtn.Name = "PosBtn_" .. posType
+    PosBtn.Size = UI_CONFIG.PosBtnSize
+    PosBtn.Position = UDim2.new(0, posBtnXStart + (i-1)*(UI_CONFIG.PosBtnSize.X.Offset + 6), 0.6, -12.5)
+    PosBtn.BackgroundColor3 = posType == currentPositionType and Color3.new(0, 1, 0) or Color3.fromRGB(60, 60, 60)
+    PosBtn.Text = posType
+    PosBtn.TextColor3 = Color3.new(1, 1, 1)
+    PosBtn.Font = Enum.Font.SourceSansBold
+    PosBtn.TextSize = 8
+    PosBtn.Parent = MainPanel
+    
+    -- 位置切换逻辑（原有）
+    PosBtn.MouseButton1Click:Connect(function()
+        if isEditingDistance then return end
+        currentPositionType = posType
+        for _, btn in ipairs(MainPanel:GetChildren()) do
+            if btn.Name:find("PosBtn_") then
+                btn.BackgroundColor3 = btn.Text == currentPositionType and Color3.new(0, 1, 0) or Color3.fromRGB(60, 60, 60)
+            end
+        end
+        print("[跟随系统] 跟随位置切换为：" .. currentPositionType)
+    end)
+end
+-- 5. 跟随距离输入框逻辑（原有）
+DistanceInput.Focused:Connect(function()
+    isEditingDistance = true
+    DistanceInput.Text = tostring(currentDistance)
+end)
+DistanceInput.FocusLost:Connect(function(enterPressed)
+    isEditingDistance = false
+    if enterPressed then
+        local inputNum = tonumber(DistanceInput.Text)
+        if inputNum then
+            currentDistance = math.clamp(inputNum, UI_CONFIG.MinDistance, UI_CONFIG.MaxDistance)
+            DistanceInput.Text = tostring(currentDistance)
+            print("[跟随系统] 跟随距离更新为：" .. currentDistance)
+        else
+            DistanceInput.Text = tostring(currentDistance)
+            print("[跟随系统] 输入无效！请输入2-50之间的数字")
+        end
+    else
+        DistanceInput.Text = tostring(currentDistance)
+    end
+end)
+-- 6. 主面板拖动逻辑（原有）
+DragBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Touch and not isEditingDistance then
+        isDraggingMainPanel = true
+        local dragStartPos = input.Position
+        local panelStartPos = MainPanel.Position
+        input:GetPropertyChangedSignal("Position"):Connect(function()
+            if not isDraggingMainPanel then return end
+            local delta = input.Position - dragStartPos
+            MainPanel.Position = UDim2.new(
+                panelStartPos.X.Scale,
+                panelStartPos.X.Offset + delta.X,
+                panelStartPos.Y.Scale,
+                panelStartPos.Y.Offset + delta.Y
+            )
+        end)
+    end
+end)
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Touch then
+        isDraggingMainPanel = false
+    end
+end)
+-- 7. 跟随启停逻辑（原有）
+FollowToggleBtn.MouseButton1Click:Connect(function()
+    if isEditingDistance then return end
+    isFollowing = not isFollowing
+    if isFollowing then
+        FollowToggleBtn.Text = "停"
+        FollowToggleBtn.BackgroundColor3 = Color3.new(0.2, 1, 0.2)
+        -- 自动选择最近玩家为目标
+        local closestPlayer = nil
+        local minDist = math.huge
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                local dist = (LocalPlayer.Character.HumanoidRootPart.Position - player.Character.HumanoidRootPart.Position).Magnitude
+                if dist < minDist then
+                    minDist = dist
+                    closestPlayer = player
+                end
+            end
+        end
+        targetPlayer = closestPlayer
+        local targetName = targetPlayer and targetPlayer.Name or "无可用目标"
+        print("[跟随系统] 已启用 | 位置：" .. currentPositionType .. " | 距离：" .. currentDistance .. " | 目标：" .. targetName)
+    else
+        FollowToggleBtn.Text = "启"
+        FollowToggleBtn.BackgroundColor3 = Color3.new(1, 0.2, 0.2)
+        targetPlayer = nil
+        print("[跟随系统] 已关闭")
+    end
+end)
+-- 8. 核心跟随逻辑（原有）
+RunService.RenderStepped:Connect(function()
+    if not isFollowing or not targetPlayer or not targetPlayer.Character then return end
+    local localChar = LocalPlayer.Character
+    if not localChar or not localChar:FindFirstChild("HumanoidRootPart") then return end
+    local targetRoot = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not targetRoot then return end
+    
+    local targetPos = POSITION_CONFIG[currentPositionType](targetRoot)
+    local localRoot = localChar.HumanoidRootPart
+    localRoot.CFrame = CFrame.new(targetPos, targetRoot.Position)
+end)
+-- ======================== 第三部分：攻击功能（原有，集成到主面板） ========================
+local requestSkill = ReplicatedStorage:WaitForChild("@rbxts/wcs:source/networking@GlobalEvents"):WaitForChild("requestSkill")
+local isAttackRunning = false
+local attackCooldown = 0 -- 0冷却设定
+local lastFire = 0
+local currentAttackStage = 1 -- 1段=原3段，2段=原专属功能
+local isLongPressing = false
+local longPressDelay = 0.5
+-- 攻击技能参数配置（原有）
+local skillArgsConfig = {
+    [1] = {
+        buffer = buffer.fromstring("\b\000\000\000M1Attack\001\003\000\000\000\001\001\001"),
+        blobs = {0, -9e9, true}
+    },
+    [2] = {
+        buffer = buffer.fromstring("\b\000\000\000M1Attack\001\003\000\000\000\001\001\001"),
+        blobs = {-9999, -9e9, true}
+    }
+}
+-- 攻击按钮（原有）
+local AttackBtn = Instance.new("TextButton")
+AttackBtn.Name = "AttackToggleBtn"
+AttackBtn.Size = UI_CONFIG.AttackBtnSize
+AttackBtn.Position = UDim2.new(0, UI_CONFIG.AttackBtnPosX, 0.15, -12.5)
+AttackBtn.BackgroundColor3 = Color3.new(1, 0.2, 0.2)
+AttackBtn.Text = "攻(1段)"
+AttackBtn.TextColor3 = Color3.new(1, 1, 1)
+AttackBtn.Font = Enum.Font.SourceSansBold
+AttackBtn.TextSize = 10
+AttackBtn.ZIndex = 2
+AttackBtn.Parent = MainPanel
+-- 核心技能调用函数（原有）
+local function fireSkill()
+    local now = tick()
+    if now - lastFire < attackCooldown then return end
+    lastFire = now
+    pcall(function()
+        requestSkill:FireServer(skillArgsConfig[currentAttackStage])
+    end)
+end
+-- 攻击循环执行函数（原有）
+local function skillLoop()
+    while isAttackRunning do
+        fireSkill()
+        RunService.RenderStepped:Wait()
+    end
+end
+-- 攻击按钮交互逻辑（原有）
+local longPressConnection
+AttackBtn.InputBegan:Connect(function(input)
+    if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) and not isEditingDistance then
+        isLongPressing = false
+        longPressConnection = task.delay(longPressDelay, function()
+            isLongPressing = true
+            currentAttackStage = currentAttackStage % 2 + 1
+            AttackBtn.Text = isAttackRunning and ("停(" .. currentAttackStage .. "段)") or ("攻(" .. currentAttackStage .. "段)")
+            print("[攻击系统] 当前攻击段数切换为: " .. currentAttackStage .. "段")
+        end)
+    end
+end)
+AttackBtn.InputEnded:Connect(function(input)
+    if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+        if longPressConnection then
+            task.cancel(longPressConnection)
+            longPressConnection = nil
+        end
+        if not isLongPressing and not isEditingDistance then
+            isAttackRunning = not isAttackRunning
+            if isAttackRunning then
+                AttackBtn.Text = "停(" .. currentAttackStage .. "段)"
+                AttackBtn.BackgroundColor3 = Color3.new(0.2, 1, 0.2)
+                print("[攻击系统] " .. currentAttackStage .. "段极限连发已启用")
+                task.spawn(skillLoop)
+            else
+                AttackBtn.Text = "攻(" .. currentAttackStage .. "段)"
+                AttackBtn.BackgroundColor3 = Color3.new(1, 0.2, 0.2)
+                print("[攻击系统] " .. currentAttackStage .. "段极限连发已停止")
+            end
+        end
+        isLongPressing = false
+    end
+end)
+-- ======================== 核心：独立小UI控制逻辑（隐藏/显示主面板） ========================
+local function toggleMainUIVisibility()
+    isUIVisible = not isUIVisible
+    MainPanel.Visible = isUIVisible
+    SmallHideToggleBtn.Text = isUIVisible and "隐" or "显"
+    print("[独立UI控制] " .. (isUIVisible and "显示主面板" or "隐藏主面板"))
+end
+-- 1. 小UI按钮点击控制
+SmallHideToggleBtn.MouseButton1Click:Connect(toggleMainUIVisibility)
+-- 2. 快捷键控制（可选，左Alt键，可修改）
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if not gameProcessed and input.KeyCode == Enum.KeyCode.LeftAlt then
+        toggleMainUIVisibility()
+    end
+end)
+-- ======================== 通用逻辑：角色重生适配（原有） ========================
+LocalPlayer.CharacterAdded:Connect(function(newChar)
+    Character = newChar
+    Humanoid = newChar:WaitForChild("Humanoid")
+    -- 重生后恢复跟随状态
+    if isFollowing then
+        local closestPlayer = nil
+        local minDist = math.huge
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                local dist = (LocalPlayer.Character.HumanoidRootPart.Position - player.Character.HumanoidRootPart.Position).Magnitude
+                if dist < minDist then
+                    minDist = dist
+                    closestPlayer = player
+                end
+            end
+        end
+        targetPlayer = closestPlayer
+        local targetName = targetPlayer and targetPlayer.Name or "无可用目标"
+        print("[跟随系统] 角色重生 | 位置：" .. currentPositionType .. " | 距离：" .. currentDistance .. " | 目标：" .. targetName)
+    end
+    -- 确保UI挂载，恢复显示状态
+    if not MainGui.Parent then
+        MainGui.Parent = PlayerGui
+    end
+    MainPanel.Visible = isUIVisible
+    SmallHideToggleBtn.Visible = true -- 独立小UI始终显示，方便操作
+end)
+-- ======================== 脚本加载完成提示（更新说明） ========================
+print("=== OP的愤怒追踪+两段攻击连发+独立隐藏小UI 合并脚本加载完成 ===")
+print("核心新增：独立隐藏小UI（右上角悬浮）- 1. 点击切换主面板显隐 2. 长按拖动调整位置 3. 左Alt键快捷切换")
+print("跟随功能：1. 输入2-50数字按回车调距离 2. 5个按钮切换跟随位置 3. 左侧按钮启停")
+print("攻击功能：1. 短按右侧'攻'按钮启停连发 2. 长按'攻'按钮切换1-2段攻击 3. 0冷却无上限")
+print("通用操作：主面板拖动右侧窄条调整位置，重生不销毁")
